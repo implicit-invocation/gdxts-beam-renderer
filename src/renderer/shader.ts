@@ -2,7 +2,6 @@ import { Shader } from "gdxts";
 
 const VS = /* glsl */ `
   attribute vec4 ${Shader.POSITION};
-  attribute vec2 ${Shader.TEXCOORDS};
   attribute vec2 a_start;
   attribute vec2 a_end;
   attribute float a_time;
@@ -13,7 +12,7 @@ const VS = /* glsl */ `
   varying float v_time;
   uniform mat4 ${Shader.MVP_MATRIX};
   void main() {
-    v_texCoord = ${Shader.TEXCOORDS};
+    v_texCoord = ${Shader.POSITION}.xy;
     gl_Position = u_projTrans * ${Shader.POSITION};
     v_start = a_start;
     v_end = a_end;
@@ -56,12 +55,7 @@ const FS = /* glsl */ `
     vec2 beamDir = normalize(mouse - center);
     float targetLength = length(mouse - center);
     
-    // if (iTime > totalDuration) {
-    //   discard;
-    // }
-    // Local time for the beam animation
     float localTime = mod(iTime, totalDuration);
-    
     
     // Calculate current beam length and fade
     float currentLength;
@@ -70,23 +64,19 @@ const FS = /* glsl */ `
     float impactIntensity = 0.0;
     
     if (localTime < growDuration) {
-      // Growing phase
       currentLength = targetLength * (localTime / growDuration);
       fade = 1.0;
       rootIntensity = 1.0;
       impactIntensity = 0.0;
     } 
     else if (localTime < growDuration + lingerDuration) {
-      // Lingering phase
       currentLength = targetLength;
       fade = 1.0;
       rootIntensity = 1.0;
-      // Pulse the impact effect during linger
       float lingerTime = (localTime - growDuration) / lingerDuration;
       impactIntensity = 1.0 + 0.2 * sin(lingerTime * 30.0);
     }
     else {
-      // Fading phase
       currentLength = targetLength;
       float fadeTime = localTime - (growDuration + lingerDuration);
       fade = 1.0 - (fadeTime / fadeDuration);
@@ -94,7 +84,7 @@ const FS = /* glsl */ `
       impactIntensity = fade * 0.5;
     }
     
-    // Distance from current pixel to the line segment (beam)
+    // Distance calculations
     vec2 p = uv - center;
     float h = clamp(dot(p, beamDir) / currentLength, 0.0, 1.0);
     vec2 projection = center + beamDir * h * currentLength;
@@ -102,30 +92,28 @@ const FS = /* glsl */ `
     
     // Create the beam layers
     float core = smoothstep(coreThickness, 0.0, dist);
-    float beam = smoothstep(beamThickness + glowThickness, beamThickness, dist);
+    float beamAlpha = smoothstep(beamThickness + glowThickness, beamThickness, dist);
     
     // Root circle parameters
-    float rootRadius = 0.03;        // Size of the root circle
-    float rootGlow = 0.03;          // Size of the root circle's glow
+    float rootRadius = 0.01;
+    float rootGlow = 0.02;
     float distFromRoot = length(uv - center);
     float rootAlpha = smoothstep(rootRadius + rootGlow, rootRadius * 0.5, distFromRoot);
     float rootCore = smoothstep(rootRadius * 0.5, 0.0, distFromRoot);
     
-    // Impact effect at target
+    // Impact effect
     vec2 targetPos = center + beamDir * currentLength;
     float distFromTarget = length(uv - targetPos);
     float impactRadius = 0.01;
-    float impactGlow = 0.05;
+    float impactGlow = 0.02;
     
-    // Create expanding ring effect
     float ringSize = impactRadius * (1.0 + 0.3 * sin(localTime * 10.0));
     float ringThickness = 0.005;
     float ring = smoothstep(ringSize + ringThickness, ringSize, distFromTarget) 
           - smoothstep(ringSize, ringSize - ringThickness, distFromTarget);
     
-    // Create central impact glow
     float impactCore = smoothstep(impactRadius + impactGlow, impactRadius, distFromTarget);
-    float impact = impactCore + ring * 0.5;
+    float impactAlpha = (impactCore + ring * 0.5) * impactIntensity;
     
     // Root fade effect
     float rootFade = 1.0;
@@ -135,36 +123,45 @@ const FS = /* glsl */ `
       rootFade = smoothstep(fadeProgress, fadeProgress + 0.2, h);
     }
     
-    // Color gradient for the main beam
+    // Color calculations
     vec3 beamColor = mix(
-      vec3(0.2, 0.6, 1.0), // Blue core
-      vec3(0.1, 0.3, 1.0), // Darker blue edge
+      vec3(0.2, 0.6, 1.0),
+      vec3(0.1, 0.3, 1.0),
       dist / (beamThickness + glowThickness)
     );
     
-    // Combine core and beam
-    vec3 col = mix(beamColor, vec3(1.0), core) * beam * fade * rootFade;
+    // Separate color and alpha for each component
+    vec3 beamFinalColor = mix(beamColor, vec3(1.0), core);
+    float beamFinalAlpha = beamAlpha * fade * rootFade;
     
-    // Add bloom/glow effect
-    float bloom = smoothstep(beamThickness + glowThickness, beamThickness, dist * 0.5);
-    col += beamColor * bloom * 0.5 * fade * rootFade;
+    vec3 rootFinalColor = mix(beamColor, vec3(1.0), rootCore);
+    float rootFinalAlpha = rootAlpha * rootIntensity;
     
-    // Add root circle with glow
-    vec3 rootCol = mix(beamColor, vec3(1.0), rootCore);
-    vec3 finalCol = col;
-    if (rootAlpha > 0.0) {
-      finalCol = mix(col, rootCol, rootAlpha * rootIntensity);
+    vec3 impactFinalColor = mix(beamColor * 1.5, vec3(1.0), 0.5);
+    
+    // Combine all components
+    vec3 finalColor = vec3(0.0);
+    float finalAlpha = 0.0;
+    
+    // Add beam
+    finalColor += beamFinalColor * beamFinalAlpha;
+    finalAlpha += beamFinalAlpha;
+    
+    // Add root
+    finalColor += rootFinalColor * rootFinalAlpha;
+    finalAlpha += rootFinalAlpha;
+    
+    // Add impact
+    finalColor += impactFinalColor * impactAlpha;
+    finalAlpha += impactAlpha;
+    
+    // Normalize color if we have any alpha
+    if (finalAlpha > 0.0) {
+      finalColor /= finalAlpha;
     }
     
-    // Add impact effect
-    vec3 impactCol = mix(beamColor * 1.5, vec3(1.0), 0.5);
-    finalCol += impactCol * impact * impactIntensity;
-    
-    // Calculate alpha based on beam visibility and root circle
-    float alpha = max(max(beam * fade * rootFade, rootAlpha * rootIntensity), impact * impactIntensity);
-    
-    // Output final color with transparency
-    gl_FragColor = vec4(finalCol, alpha);
+    // gl_FragColor = vec4(1.0, 1.0, 1.0, finalAlpha);
+    gl_FragColor = vec4(finalColor, finalAlpha);
   }
 `;
 
